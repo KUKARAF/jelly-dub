@@ -140,23 +140,57 @@ def generate_dub_audio(mkv_path: Path, srt_path: Path, language: str, work_dir: 
         if i % 25 == 0:
             print(f"[pipeline] cue {i}/{len(cues)}", flush=True)
 
-    inputs = ["-f", "lavfi", "-t", str(total_duration), "-i", "anullsrc=r=24000:cl=mono"]
-    filter_parts = []
-    mix_inputs = ["[0:a]"]
+    out_path = work_dir / f"dub_{language}.wav"
+    mix_dub_over_bed(mkv_path, clip_paths, total_duration, out_path)
+    return out_path
+
+
+# Ported from doblarr/stages/mix.py (the real Doblarr source, not the plan.md
+# summary) after a first naive version came out "way too quiet with no sound
+# effects audible": ffmpeg's amix defaults to normalize=1, which divides
+# volume by the input count, and a silence-only bed obviously drops all
+# background music/SFX. Doblarr's own no-Demucs fallback mixes the ORIGINAL
+# full audio in at reduced volume as the bed and sidechain-ducks it under the
+# new dialogue, rather than replacing it with silence.
+BED_FALLBACK_VOLUME = 0.2  # Doblarr's fallback_volume when there's no separated background
+DUCK_THRESHOLD = 0.02
+DUCK_RATIO = 12.0
+DUCK_ATTACK_MS = 20
+DUCK_RELEASE_MS = 250
+
+
+def mix_dub_over_bed(
+    mkv_path: Path,
+    clip_paths: list[tuple[float, Path]],
+    total_duration: float,
+    out_path: Path,
+) -> None:
+    inputs = ["-i", str(mkv_path)]  # [0:a] = original full audio -> the bed
+    filter_parts = [f"[0:a]volume={BED_FALLBACK_VOLUME:g},aformat=channel_layouts=stereo[bed]"]
     for i, (offset_s, path) in enumerate(clip_paths):
         inputs += ["-i", str(path)]
         delay_ms = max(int(offset_s * 1000), 0)
-        filter_parts.append(f"[{i+1}:a]adelay={delay_ms}|{delay_ms}[d{i}]")
-        mix_inputs.append(f"[d{i}]")
-    filter_complex = ";".join(filter_parts)
-    if filter_complex:
-        filter_complex += f";{''.join(mix_inputs)}amix=inputs={len(mix_inputs)}:dropout_transition=0[aout]"
-    else:
-        filter_complex = "[0:a]acopy[aout]"
+        filter_parts.append(f"[{i+1}:a]adelay={delay_ms}|{delay_ms},aformat=channel_layouts=stereo[c{i}]")
 
-    out_path = work_dir / f"dub_{language}.wav"
+    if not clip_paths:
+        filter_parts.append("[bed]acopy[out]")
+    else:
+        clip_refs = "".join(f"[c{i}]" for i in range(len(clip_paths)))
+        if len(clip_paths) == 1:
+            filter_parts.append(f"[c0]apad=whole_dur={total_duration:g},asplit=2[dlg][key]")
+        else:
+            filter_parts.append(
+                f"{clip_refs}amix=inputs={len(clip_paths)}:normalize=0,"
+                f"apad=whole_dur={total_duration:g},asplit=2[dlg][key]"
+            )
+        filter_parts.append(
+            f"[bed][key]sidechaincompress=threshold={DUCK_THRESHOLD:g}:ratio={DUCK_RATIO:g}"
+            f":attack={DUCK_ATTACK_MS:g}:release={DUCK_RELEASE_MS:g}:makeup=1[ducked]"
+        )
+        filter_parts.append("[ducked][dlg]amix=inputs=2:normalize=0[master]")
+        filter_parts.append("[master]alimiter=limit=0.95:level=false:latency=true[out]")
+
     subprocess.run(
-        ["ffmpeg", "-y", *inputs, "-filter_complex", filter_complex, "-map", "[aout]", str(out_path)],
+        ["ffmpeg", "-y", *inputs, "-filter_complex", ";".join(filter_parts), "-map", "[out]", str(out_path)],
         check=True, capture_output=True,
     )
-    return out_path
