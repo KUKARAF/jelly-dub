@@ -1,23 +1,33 @@
 #!/usr/bin/env bash
-# Run the jelly-dub worker end-to-end against a real mkv+srt pair and save
-# the resulting dubbed audio track next to the input.
+# Run the jelly-dub worker against a real mkv+srt pair, executing remotely on
+# the GPU box (bazzite) over ssh - this is meant to be run from a dev
+# machine, not on bazzite itself.
 #
 # Usage:
 #   ./run_full_test.sh <file.mkv> <subtitles.srt> [language] [output.wav]
 #
-# Must run on a box with the Arc GPU passthrough available (bazzite), from
-# inside the jelly-dub repo checkout (expects ./worker/Dockerfile to exist).
-# Starts (or reuses) a long-lived worker container bound to 127.0.0.1 only -
-# this is LAN/local-only tooling, not meant to be exposed publicly.
+# What it does: scp's worker/ (the Dockerfile + app + remote_run.sh) and the
+# input files to the remote box, ssh's in to build/start the worker and run
+# one job there (all GPU/podman work happens on bazzite, nothing locally),
+# then scp's the resulting dubbed audio back to the local output path.
+#
+# Override the remote target with env vars:
+#   JELLY_DUB_HOST (ssh destination, default: local_bazzite)
+#   JELLY_DUB_REMOTE_DIR (where to sync worker/ on the remote box,
+#                         default: ~/jelly-dub-worker)
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKER_DIR="$SCRIPT_DIR/worker"
-IMAGE="localhost/jelly-dub-worker"
-CONTAINER="jelly-dub-worker-run"
-PORT=8420
-DATA_DIR="$SCRIPT_DIR/.run_full_test_data"
+HOST="${JELLY_DUB_HOST:-local_bazzite}"
+
+# Resolve to an absolute path up front: paths get passed through ssh/curl's
+# @filename args later, where a literal unexpanded "~" (e.g. from
+# single-quoting in a remote ssh command) makes curl fail with "couldn't
+# read file" (exit 26) instead of expanding to the home directory.
+REMOTE_HOME="$(ssh "$HOST" 'echo $HOME')"
+REMOTE_DIR="${JELLY_DUB_REMOTE_DIR:-${REMOTE_HOME}/jelly-dub-worker}"
 
 if [ $# -lt 2 ]; then
   echo "usage: $0 <file.mkv> <subtitles.srt> [language] [output.wav]" >&2
@@ -41,57 +51,22 @@ if ! [ -d "$WORKER_DIR" ]; then
   exit 1
 fi
 
-echo "[1/5] ensuring worker image is built..."
-if ! podman image exists "$IMAGE"; then
-  podman build -t "$IMAGE" -f "$WORKER_DIR/Dockerfile" "$WORKER_DIR"
-fi
+echo "[local 1/4] syncing worker/ to ${HOST}:${REMOTE_DIR}..."
+ssh "$HOST" "mkdir -p ${REMOTE_DIR}/input"
+scp -rq "$WORKER_DIR/Dockerfile" "$WORKER_DIR/requirements.txt" "$WORKER_DIR/app" "$WORKER_DIR/remote_run.sh" \
+  "$HOST:${REMOTE_DIR}/"
+ssh "$HOST" "chmod +x ${REMOTE_DIR}/remote_run.sh"
 
-echo "[2/5] ensuring worker container is running..."
-mkdir -p "$DATA_DIR"
-if ! podman container exists "$CONTAINER" || [ "$(podman inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" != "true" ]; then
-  podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
-  podman run -d --name "$CONTAINER" \
-    --device /dev/dri --group-add keep-groups --security-opt label=disable --ipc host \
-    -v "$DATA_DIR:/work" \
-    -p "127.0.0.1:${PORT}:${PORT}" \
-    "$IMAGE" >/dev/null
-fi
+echo "[local 2/4] copying input files to ${HOST}..."
+REMOTE_MKV="${REMOTE_DIR}/input/$(basename "$MKV")"
+REMOTE_SRT="${REMOTE_DIR}/input/$(basename "$SRT")"
+REMOTE_OUT="${REMOTE_DIR}/input/output_${LANG}.wav"
+scp -q "$MKV" "$HOST:${REMOTE_MKV}"
+scp -q "$SRT" "$HOST:${REMOTE_SRT}"
 
-echo "[3/5] waiting for worker health..."
-for i in $(seq 1 60); do
-  if curl -s -f "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
-    break
-  fi
-  sleep 2
-  if [ "$i" -eq 60 ]; then
-    echo "error: worker did not become healthy in time; check: podman logs $CONTAINER" >&2
-    exit 1
-  fi
-done
+echo "[local 3/4] running the pipeline remotely on ${HOST} (this can take a while)..."
+ssh "$HOST" "${REMOTE_DIR}/remote_run.sh '${REMOTE_MKV}' '${REMOTE_SRT}' '${LANG}' '${REMOTE_OUT}'"
 
-echo "[4/5] submitting job (mkv=$MKV srt=$SRT language=$LANG)..."
-RESPONSE=$(curl -s -X POST "http://127.0.0.1:${PORT}/dub" \
-  -F "mkv=@${MKV}" \
-  -F "srt=@${SRT}" \
-  -F "language=${LANG}")
-JOB_ID=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
-echo "job id: $JOB_ID"
-
-echo "[5/5] waiting for the job to finish (this can take a while for a full episode)..."
-while true; do
-  STATUS_JSON=$(curl -s "http://127.0.0.1:${PORT}/dub/${JOB_ID}")
-  STATUS=$(echo "$STATUS_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
-  echo "  status: $STATUS"
-  case "$STATUS" in
-    done) break ;;
-    failed)
-      ERROR=$(echo "$STATUS_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('error'))")
-      echo "job failed: $ERROR" >&2
-      exit 1
-      ;;
-  esac
-  sleep 5
-done
-
-curl -s "http://127.0.0.1:${PORT}/dub/${JOB_ID}/audio" -o "$OUT"
+echo "[local 4/4] fetching result..."
+scp -q "$HOST:${REMOTE_OUT}" "$OUT"
 echo "wrote $OUT"
