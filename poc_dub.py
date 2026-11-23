@@ -1,5 +1,5 @@
 import torch
-import torchaudio as ta
+import soundfile as sf
 from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 
 print(f"torch.xpu.is_available(): {torch.xpu.is_available()}", flush=True)
@@ -19,7 +19,7 @@ for lang, text, name in lines:
     print(f"generating {name} ({lang}): {text}", flush=True)
     wav = model.generate(text, language_id=lang, audio_prompt_path=ref)
     out = f"/work/{name}_{lang}.wav"
-    ta.save(out, wav, model.sr)
+    sf.write(out, wav.squeeze().cpu().numpy(), model.sr)
     print(f"wrote {out}", flush=True)
 
 print("done", flush=True)

@@ -14,6 +14,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=intel-gpu-runtime /usr/lib/x86_64-linux-gnu/libze_loader.so* /usr/lib/x86_64-linux-gnu/
 COPY --from=intel-gpu-runtime /usr/lib/x86_64-linux-gnu/libze_intel_gpu.so* /usr/lib/x86_64-linux-gnu/
+# libze_intel_gpu.so depends on this (Intel Graphics Memory Manager) - without
+# it the loader silently finds zero devices rather than erroring loudly.
+COPY --from=intel-gpu-runtime /usr/lib/x86_64-linux-gnu/libigdgmm.so* /usr/lib/x86_64-linux-gnu/
 COPY --from=intel-gpu-runtime /etc/OpenCL/vendors/intel.icd /etc/OpenCL/vendors/intel.icd
 COPY --from=intel-gpu-runtime /etc/OpenCL/vendors/intel64.icd /etc/OpenCL/vendors/intel64.icd
 RUN ldconfig
