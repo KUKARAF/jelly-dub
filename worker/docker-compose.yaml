@@ -1,0 +1,18 @@
+services:
+  dub-worker:
+    build: .
+    image: localhost/jelly-dub-worker
+    container_name: jelly-dub-worker
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - keep-groups
+    security_opt:
+      - label=disable
+    ipc: host
+    ports:
+      - "8420:8420"  # LAN-only by convention here, not reverse-proxied publicly
+    volumes:
+      - ./data/jobs:/work/jobs
+      - ./data/db:/work/data
+    restart: unless-stopped
