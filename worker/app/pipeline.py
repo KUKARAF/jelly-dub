@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import subprocess
 from pathlib import Path
+from typing import Callable, Optional
 
 import soundfile as sf
 import torch
@@ -104,12 +105,28 @@ def _ffprobe_duration(path: Path) -> float:
     return float(out.strip())
 
 
-def generate_dub_audio(mkv_path: Path, srt_path: Path, language: str, work_dir: Path) -> Path:
-    """Full pipeline for one (mkv, srt, language). Returns path to the output wav."""
+def generate_dub_audio(
+    mkv_path: Path,
+    srt_path: Path,
+    language: str,
+    work_dir: Path,
+    on_progress: Optional[Callable[[int, int], None]] = None,
+) -> Path:
+    """Full pipeline for one (mkv, srt, language). Returns path to the output wav.
+
+    on_progress(current, total), if given, is called once total is known
+    (before cue 0) and again after each cue finishes - TTS generation is the
+    overwhelmingly dominant cost per cue, so "cues done" is a fair proxy for
+    overall job progress even though reference extraction and the final mix
+    aren't counted individually.
+    """
     work_dir.mkdir(parents=True, exist_ok=True)
     cues = parse_srt(srt_path)
     if not cues:
         raise ValueError("no cues found in srt")
+
+    if on_progress:
+        on_progress(0, len(cues))
 
     ref_start, ref_end = pick_reference_window(cues)
     ref_path = work_dir / "ref.wav"
@@ -137,6 +154,8 @@ def generate_dub_audio(mkv_path: Path, srt_path: Path, language: str, work_dir: 
         else:
             fitted = raw
         clip_paths.append((start, fitted))
+        if on_progress:
+            on_progress(i + 1, len(cues))
         if i % 25 == 0:
             print(f"[pipeline] cue {i}/{len(cues)}", flush=True)
 

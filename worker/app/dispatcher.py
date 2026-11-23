@@ -37,7 +37,10 @@ def _run_job(job: db.Job) -> None:
     mkv_path = Path(config.WORK_DIR) / job.mkv_hash / "input.mkv"
     srt_path = job_dir / "input.srt"
     try:
-        out_path = pipeline.generate_dub_audio(mkv_path, srt_path, job.language, job_dir)
+        out_path = pipeline.generate_dub_audio(
+            mkv_path, srt_path, job.language, job_dir,
+            on_progress=lambda current, total: db.set_progress(job.id, current, total),
+        )
         db.set_status(job.id, "done", output_path=str(out_path))
         print(f"[dispatcher] job {job.id} done -> {out_path}", flush=True)
     except JOB_FAILURE_TYPES as e:

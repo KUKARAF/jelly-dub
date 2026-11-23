@@ -60,12 +60,17 @@ echo "job id: $JOB_ID"
 echo "[5/5] waiting for the job to finish (this can take a while for a full episode)..."
 while true; do
   STATUS_JSON=$(curl -s "http://127.0.0.1:${PORT}/dub/${JOB_ID}")
-  STATUS=$(echo "$STATUS_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
-  echo "  status: $STATUS"
+  IFS=$'\t' read -r STATUS DISPLAY ERROR < <(echo "$STATUS_JSON" | python3 -c "
+import sys, json
+j = json.load(sys.stdin)
+status, pct, cur, total = j['status'], j.get('progress_percent'), j['progress_current'], j['progress_total']
+display = f'processing {pct}% done ({cur}/{total} cues)' if status == 'processing' and pct is not None else status
+print(f\"{status}\t{display}\t{j.get('error') or ''}\")
+")
+  echo "  $DISPLAY"
   case "$STATUS" in
     done) break ;;
     failed)
-      ERROR=$(echo "$STATUS_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('error'))")
       echo "job failed: $ERROR" >&2
       exit 1
       ;;

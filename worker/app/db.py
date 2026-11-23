@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     updated_at REAL NOT NULL,
     error TEXT,
     output_path TEXT,
+    progress_current INTEGER NOT NULL DEFAULT 0,
+    progress_total INTEGER NOT NULL DEFAULT 0,
     UNIQUE(mkv_hash, language)
 );
 """
@@ -49,6 +51,14 @@ class Job:
     updated_at: float
     error: Optional[str]
     output_path: Optional[str]
+    progress_current: int
+    progress_total: int
+
+    @property
+    def progress_percent(self) -> Optional[int]:
+        if self.progress_total <= 0:
+            return None
+        return round(100 * self.progress_current / self.progress_total)
 
 
 def _row_to_job(row: sqlite3.Row) -> Job:
@@ -93,8 +103,8 @@ def create_or_get_job(mkv_hash: str, language: str) -> tuple[Job, bool]:
         if existing:
             return _row_to_job(existing), False
         conn.execute(
-            "INSERT INTO jobs (id, mkv_hash, language, status, created_at, updated_at, error, output_path) "
-            "VALUES (?, ?, ?, 'queued', ?, ?, NULL, NULL)",
+            "INSERT INTO jobs (id, mkv_hash, language, status, created_at, updated_at, error, output_path, "
+            "progress_current, progress_total) VALUES (?, ?, ?, 'queued', ?, ?, NULL, NULL, 0, 0)",
             (job_id, mkv_hash, language, now, now),
         )
         row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
@@ -128,4 +138,15 @@ def set_status(job_id: str, status: str, error: Optional[str] = None, output_pat
         conn.execute(
             "UPDATE jobs SET status=?, error=?, output_path=COALESCE(?, output_path), updated_at=? WHERE id=?",
             (status, error, output_path, time.time(), job_id),
+        )
+
+
+def set_progress(job_id: str, current: int, total: int) -> None:
+    """Called frequently (once per cue) from the pipeline thread - a plain
+    UPDATE rather than routing through set_status so a progress tick never
+    has to carry status/error/output_path along for the ride."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET progress_current=?, progress_total=?, updated_at=? WHERE id=?",
+            (current, total, time.time(), job_id),
         )

@@ -43,13 +43,17 @@ class JobResponse(BaseModel):
     created_at: float
     updated_at: float
     error: str | None = None
+    progress_current: int = 0
+    progress_total: int = 0
+    progress_percent: int | None = None  # None until progress_total is known
 
     @classmethod
     def from_job(cls, job: db.Job) -> "JobResponse":
         return cls(
             id=job.id, mkv_hash=job.mkv_hash, language=job.language,
             status=job.status, created_at=job.created_at, updated_at=job.updated_at,
-            error=job.error,
+            error=job.error, progress_current=job.progress_current,
+            progress_total=job.progress_total, progress_percent=job.progress_percent,
         )
 
 
